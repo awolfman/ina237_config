@@ -12,6 +12,8 @@ password=sys.argv[4]
 #
 # Настройки для INA237 
 i2caddr = [0x4a, 0x4b, 0x4e, 0x4f]
+_get = i2cget
+_set = i2cset
 # Регистры
 REG_CONFIG = 0x00
 REG_ADC_CONFIG = 0x01
@@ -49,29 +51,29 @@ with paramiko.SSHClient() as client:
     while i < 4:
         print (f"Фидер {i+1}:" )
 # Записываем калибровочное значение
-        (stdin, stdout, stderr) = client.exec_command(f'i2cset -y {bus} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_set} -y {bus} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
         time.sleep(0.1)
 # Проверяем, что всё записалось правильно
-        (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {bus} {i2caddr[i]} {REG_SHUNT_CAL} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_get} -y {bus} {i2caddr[i]} {REG_SHUNT_CAL} w')
         print("Проверяем паравильность записи калибровки:", stdout.read().decode() )
 #
-        (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {bus} {i2caddr[i]} {REG_VBUS} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_get} -y {bus} {i2caddr[i]} {REG_VBUS} w')
         raw_vbus = stdout.read().decode()
         vbus = int( ''.join(char for char in raw_vbus if char.isalnum()) , 16 )
         print ("Vin = {:.2f} V".format(vbus * 0.003125 ) )
 #
-        (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {bus} {i2caddr[i]} {REG_CURRENT} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_get} -y {bus} {i2caddr[i]} {REG_CURRENT} w')
         raw_current = stdout.read().decode()
         current = int( ''.join(char for char in raw_current if char.isalnum()) , 16 )
         print ("Iin = {:.2f} A".format(current * current_lsb ) )
 #
-        (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {bus} {i2caddr[i]} {REG_POWER} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_get} -y {bus} {i2caddr[i]} {REG_POWER} w')
         raw_power = stdout.read().decode()
         power = int( ''.join(char for char in raw_power if char.isalnum()) , 16 )
         power &= 0x00FFFFFF # Ensure bit 31-24 is reserved
         print ("Pin = {:.2f} W".format(power_lsb * power ) )
 #
-        (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {bus} {i2caddr[i]} {REG_DIETEMP} w')
+        (stdin, stdout, stderr) = client.exec_command(f'{_get} -y {bus} {i2caddr[i]} {REG_DIETEMP} w')
         raw_temperature = stdout.read().decode()
         temperature = int( ''.join(char for char in raw_temperature if char.isalnum()) , 16 )
         temperature &= 0xFFF0  # Ensure bits 0-3 are reserved (set to 0)
