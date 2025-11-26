@@ -11,6 +11,13 @@ bus = sys.argv[2]
 user = sys.argv[3]
 password=sys.argv[4]
 
+#method for computing twos complement
+def twos_comp(val, bits):
+#compute the 2's complement of int value val
+    if (val & (1 << (bits - 1))) != 0: # if sign bit is set e.g., 8bit: 128-255
+        val = val - (1 << bits)        # compute negative value
+    return val
+
 # Настройки для INA237 
 i2caddr = [0x4a, 0x4b, 0x4e, 0x4f]
 _get = i2cget
@@ -40,9 +47,11 @@ max_voltage = 75
 shunt_resistance = 0.005
 max_current = 20
 current_lsb = max_current/32768
+conversion_factor = 5e(-6)
 power_lsb = 50 * current_lsb # 50 times current LSB
 calibration_value = int((819.2 * 10**6) * (current_lsb * shunt_resistance))
 calibration_value &= 0x7FFF # Ensure bit 15 is reserved (set to 0)
+sovl = ((max_current * shunt_resistance) / conversion_factor)
 
 print ("Калибровочное значение:", hex(calibration_value))
 
@@ -59,7 +68,7 @@ with paramiko.SSHClient() as client:
     while i < 4:
         try:
             print (f"Фидер {i+1}:" )
-            # Записываем калибровочное значение
+            # Записываем калибровочное значение 
             (stdin, stdout, stderr) = client.exec_command(f'i2cset -y 17 {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
             time.sleep(0.1)
             (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_SHUNT_CAL} w')
@@ -70,6 +79,10 @@ with paramiko.SSHClient() as client:
                 print (line)
                 sys.exit(1)
 
+            # Shunt Overvoltage Threshold
+            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y 17 {i2caddr[i]} {REG_SOVL} {sovl} w')
+                
+            # Bus Voltage Measurement
             (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_VBUS} w')
             for line in stderr:
                 print (line)
@@ -77,15 +90,17 @@ with paramiko.SSHClient() as client:
             raw_vbus = stdout.read().decode()
             vbus = int( ''.join(char for char in raw_vbus if char.isalnum()) , 16 )
             print ("Vin = {:.2f} V".format(vbus * 0.003125 ) )
-
+            
+            # Current Result
             (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_CURRENT} w')
             for line in stderr:
                 print (line)
                 sys.exit(1)
             raw_current = stdout.read().decode()
             current = int( ''.join(char for char in raw_current if char.isalnum()) , 16 )
-            print ("Iin = {:.2f} A".format(current * current_lsb ) )
+            print ("Iin = {:.2f} A".format(twos_comp(current, 16) * current_lsb ) )
 
+            # Power Result
             (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_POWER} w')
             for line in stderr:
                 print (line)
@@ -95,6 +110,7 @@ with paramiko.SSHClient() as client:
             power &= 0x00FFFFFF # Ensure bit 31-24 is reserved
             print ("Pin = {:.2f} W".format(power_lsb * power ) )
 
+            # Temperature Measurement
             (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_DIETEMP} w')
             for line in stderr:
                 print (line)
@@ -102,7 +118,16 @@ with paramiko.SSHClient() as client:
             raw_temperature = stdout.read().decode()
             temperature = int( ''.join(char for char in raw_temperature if char.isalnum()) , 16 )
             temperature &= 0xFFF0  # Ensure bits 0-3 are reserved (set to 0)
-            print ("Temperature = {:.2f} °C".format((temperature >> 4) * 0.125 ) )
+            print ("Temperature = {:.2f} °C".format(twos_comp(temperature >> 4), 12) * 0.125 ) )
+
+            # Shunt Voltage Measurement
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_VSHUNT} w')
+            for line in stderr:
+                print (line)
+                sys.exit(1)
+            raw_vshunt = stdout.read().decode()
+            vshunt = int( ''.join(char for char in raw_vshunt if char.isalnum()) , 16 )
+            print ("Vshunt = {:.4f} V".format(twos_comp(vshunt, 16) * current_lsb ) )
 
             print ('*****************')
 
