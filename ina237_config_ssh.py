@@ -10,6 +10,7 @@ host = sys.argv[1]
 bus = sys.argv[2]
 user = sys.argv[3]
 password=sys.argv[4]
+slot = 17
 
 #method for computing twos complement
 def twos_comp(val, bits):
@@ -48,7 +49,7 @@ shunt_resistance = 0.005
 max_current = 20
 current_lsb = max_current/32768
 conversion_factor = 5e(-6)
-power_lsb = 50 * current_lsb # 50 times current LSB
+power_lsb = 0.2 * current_lsb
 calibration_value = int((819.2 * 10**6) * (current_lsb * shunt_resistance))
 calibration_value &= 0x7FFF # Ensure bit 15 is reserved (set to 0)
 sovl = ((max_current * shunt_resistance) / conversion_factor)
@@ -69,9 +70,9 @@ with paramiko.SSHClient() as client:
         try:
             print (f"Фидер {i+1}:" )
             # Записываем калибровочное значение 
-            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y 17 {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
             time.sleep(0.1)
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_SHUNT_CAL} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} w')
             try:
                 for line in stdout:
                     print("Проверяем паравильность записи калибровки:", stdout.read().decode() )
@@ -80,10 +81,10 @@ with paramiko.SSHClient() as client:
                 sys.exit(1)
 
             # Shunt Overvoltage Threshold
-            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y 17 {i2caddr[i]} {REG_SOVL} {sovl} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SOVL} {sovl} w')
                 
             # Bus Voltage Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_VBUS} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_VBUS} w')
             for line in stderr:
                 print (line)
                 sys.exit(1)
@@ -92,7 +93,7 @@ with paramiko.SSHClient() as client:
             print ("Vin = {:.2f} V".format(vbus * 0.003125 ) )
             
             # Current Result
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_CURRENT} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_CURRENT} w')
             for line in stderr:
                 print (line)
                 sys.exit(1)
@@ -101,17 +102,17 @@ with paramiko.SSHClient() as client:
             print ("Iin = {:.2f} A".format(twos_comp(current, 16) * current_lsb ) )
 
             # Power Result
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_POWER} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_POWER} d')
             for line in stderr:
                 print (line)
                 sys.exit(1)
             raw_power = stdout.read().decode()
             power = int( ''.join(char for char in raw_power if char.isalnum()) , 16 )
-            power &= 0x00FFFFFF # Ensure bit 31-24 is reserved
-            print ("Pin = {:.2f} W".format(power_lsb * power ) )
+            # power &= 0x00FFFFFF # Ensure bit 31-24 is reserved
+            print ("Pin = {:.2f} W".format(power_lsb * (power >> 8) ) ) # (power >> 8) ensure bit 31-24 is reserved
 
             # Temperature Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_DIETEMP} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_DIETEMP} w')
             for line in stderr:
                 print (line)
                 sys.exit(1)
@@ -121,7 +122,7 @@ with paramiko.SSHClient() as client:
             print ("Temperature = {:.2f} °C".format(twos_comp(temperature >> 4), 12) * 0.125 ) )
 
             # Shunt Voltage Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y 17 {i2caddr[i]} {REG_VSHUNT} w')
+            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_VSHUNT} w')
             for line in stderr:
                 print (line)
                 sys.exit(1)
