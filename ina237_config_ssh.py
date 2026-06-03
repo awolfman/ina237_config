@@ -4,25 +4,27 @@ import paramiko
 import sys
 import socket
 import time
-import re
+
+# Проверка аргументов командной строки
+if len(sys.argv) < 5:
+    print("Использование: script.py <host> <slot> <user> <password> <slot>")
+    sys.exit(1)
 
 host = sys.argv[1]
-bus = sys.argv[2]
+# bus = sys.argv[2]
+slot = sys.argv[2]    # Номер I2C шины (передается в i2cset/i2cget)
 user = sys.argv[3]
-password=sys.argv[4]
-slot = 17
+password = sys.argv[4]
 
-#method for computing twos complement
+# Функция для вычисления дополнения до двух (для знаковых чисел)
 def twos_comp(val, bits):
-#compute the 2's complement of int value val
+# compute the 2's complement of int value val
     if (val & (1 << (bits - 1))) != 0: # if sign bit is set e.g., 8bit: 128-255
         val = val - (1 << bits)        # compute negative value
     return val
 
 # Настройки для INA237 
 i2caddr = [0x4a, 0x4b, 0x4e, 0x4f]
-_get = i2cget
-_set = i2cset
 
 # Регистры
 REG_CONFIG = 0x00
@@ -44,97 +46,72 @@ REG_MANUFACTURER_ID = 0x3E
 REG_DEVICE_ID = 0x3F
 
 # Значения для калибровки и вычислений
-max_voltage = 75
-shunt_resistance = 0.005
-max_current = 20
+max_voltage = 75            # 75 В
+shunt_resistance = 0.005    # 5 мОм
+max_current = 20            # 20 А
+
 current_lsb = max_current/32768
+vbus_lsb = 3.125 * 10**(-3)         # LSB напряжения шины = 3.125 мВ
+dietemp_lsb = 125 * 10**(-3)        # LSB температуры = 125 мК (0.125 °C)
 conversion_factor = 5 * 10 **(-6)
+
 power_lsb = 0.2 * current_lsb
 calibration_value = int((819.2 * 10**6) * (current_lsb * shunt_resistance))
-calibration_value &= 0x7FFF # Ensure bit 15 is reserved (set to 0)
-sovl = ((max_current * shunt_resistance) / conversion_factor)
+calibration_value &= 0x7FFF # Сброс 15-го бита по спецификации INA237
 
-print ("Калибровочное значение:", hex(calibration_value))
+print("Рассчитанное калибровочное значение:", hex(calibration_value))
 
-with paramiko.SSHClient() as client:
+# Подключение по SSH
+client = paramiko.SSHClient()
 
-    try:
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(host, username=user, password=password)
-    except (socket.gaierror, socket.error, socket.timeout, TimeoutError, IOError, paramiko.ssh_exception.NoValidConnectionsError):
-        print("Could not connect to %s \n" % host)
-        sys.exit(1) 
+try:
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    print(f"Подключение к {host}...")
+    client.connect(host, username=user, password=password, timeout=10)
+except (socket.gaierror, socket.error, paramiko.SSHException) as e:
+    print(f"Не удалось подключиться к {host}: {e}")
+    sys.exit(1)
 
-    i = 0
-    while i < 4:
-        try:
-            print (f"Фидер {i+1}:" )
-            # Записываем калибровочное значение 
-            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
-            time.sleep(0.1)
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} w')
-            try:
-                for line in stdout:
-                    print("Проверяем паравильность записи калибровки:", stdout.read().decode() )
-            except line in stderr:
-                print (line)
-                sys.exit(1)
+try:
+     for i in range(4):
+         print(f"\n--- Фидер {i+1} (Адрес: {hex(i2caddr[i])}) ---")
+         addr = i2caddr[i]
+         
+         # Запись калибровочного значения
+         client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
+         time.sleep(0.05)
 
-            # Shunt Overvoltage Threshold
-            (stdin, stdout, stderr) = client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SOVL} {sovl} w')
-                
-            # Bus Voltage Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_VBUS} w')
-            for line in stderr:
-                print (line)
-                sys.exit(1)
-            raw_vbus = stdout.read().decode()
-            vbus = int( ''.join(char for char in raw_vbus if char.isalnum()) , 16 )
-            print ("Vin = {:.2f} V".format(vbus * 0.003125 ) )
+         # Чтение и проверка калибровочного регистра
+         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_shunt_cal} w')
+         cal_read = parse_i2c_word(stdout.read().decode())
+         print(f"Калибровка записана/прочитана: {hex(cal_read)}")
+         
+         # Чтение напряжения шины (VBUS)
+         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_vbus} w')
+         vbus_raw = parse_i2c_word(stdout.read().decode())
+         vbus_actual = twos_comp(vbus_raw, 16) * vbus_lsb
+         print(f"Напряжение шины: {vbus_actual:.3f} В")
             
-            # Current Result
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_CURRENT} w')
-            for line in stderr:
-                print (line)
-                sys.exit(1)
-            raw_current = stdout.read().decode()
-            current = int( ''.join(char for char in raw_current if char.isalnum()) , 16 )
-            print ("Iin = {:.2f} A".format(twos_comp(current, 16) * current_lsb ) )
+         # Чтение тока (CURRENT)
+         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_current} w')
+         current_raw = parse_i2c_word(stdout.read().decode())
+         current_actual = twos_comp(current_raw, 16) * current_lsb
+         print(f"Ток: {current_actual:.3f} А")
+        
+         # Чтение мощности (POWER)
+         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_power} w')
+         power_raw = parse_i2c_word(stdout.read().decode())
+         power_actual = power_raw * power_lsb
+         print(f"Мощность: {power_actual:.3f} Вт")
+        
+         # Чтение температуры (DIETEMP)
+         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_dietemp} w')
+         temp_raw = parse_i2c_word(stdout.read().decode())
+         # Сдвиг вправо на 4 бита обязателен, так как данные температуры в INA237 лежат в битах 15:4
+         temp_raw_shifted = twos_comp(temp_raw >> 4, 12)
+         temp_actual = temp_raw_shifted * dietemp_lsb
+         print(f"Температура чипа: {temp_actual:.1f} °C")
 
-            # Power Result
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_POWER} d')
-            for line in stderr:
-                print (line)
-                sys.exit(1)
-            raw_power = stdout.read().decode()
-            power = int( ''.join(char for char in raw_power if char.isalnum()) , 16 )
-            # power &= 0x00FFFFFF # Ensure bit 31-24 is reserved
-            print ("Pin = {:.2f} W".format(power_lsb * (power >> 8) ) ) # (power >> 8) ensure bit 31-24 is reserved
-
-            # Temperature Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_DIETEMP} w')
-            for line in stderr:
-                print (line)
-                sys.exit(1)
-            raw_temperature = stdout.read().decode()
-            temperature = int( ''.join(char for char in raw_temperature if char.isalnum()) , 16 )
-            temperature &= 0xFFF0  # Ensure bits 0-3 are reserved (set to 0)
-            print ("Temperature = {:.2f} °C".format(twos_comp(temperature >> 4), 12) * 0.125 ) )
-
-            # Shunt Voltage Measurement
-            (stdin, stdout, stderr) = client.exec_command(f'i2cget -y {slot} {i2caddr[i]} {REG_VSHUNT} w')
-            for line in stderr:
-                print (line)
-                sys.exit(1)
-            raw_vshunt = stdout.read().decode()
-            vshunt = int( ''.join(char for char in raw_vshunt if char.isalnum()) , 16 )
-            print ("Vshunt = {:.4f} V".format(twos_comp(vshunt, 16) * current_lsb ) )
-
-            print ('*****************')
-
-            i = i + 1
-        except (socket.gaierror, socket.error, socket.timeout, TimeoutError, IOError, paramiko.ssh_exception.NoValidConnectionsError) as error:
-            print(error)
-            sys.exit(1)
-
+finally:
     client.close()
+    print("\nSSH-сессия закрыта.")
