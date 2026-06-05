@@ -1,117 +1,213 @@
 #!/usr/bin/python3
 
-import paramiko
+# Скрипт с автоматическим определением Endianness и автоматическим удалением/добавлением сертификата SSH
+
+import os
 import sys
 import socket
-import time
+import paramiko
 
 # Проверка аргументов командной строки
 if len(sys.argv) < 5:
-    print("Использование: script.py <host> <slot> <user> <password> <slot>")
+    print("Использование: script.py <host> <slot> <user> <password>")
     sys.exit(1)
 
 host = sys.argv[1]
-# bus = sys.argv[2]
-slot = sys.argv[2]    # Номер I2C шины (передается в i2cset/i2cget)
+slot = sys.argv[2]       # Номер I2C шины
 user = sys.argv[3]
 password = sys.argv[4]
 
-# Функция для вычисления дополнения до двух (для знаковых чисел)
 def twos_comp(val, bits):
-# compute the 2's complement of int value val
-    if (val & (1 << (bits - 1))) != 0: # if sign bit is set e.g., 8bit: 128-255
-        val = val - (1 << bits)        # compute negative value
+    """Вычисление дополнения до двух для знаковых чисел."""
+    if (val & (1 << (bits - 1))) != 0:
+        val = val - (1 << bits)
     return val
 
-# Настройки для INA237 
-i2caddr = [0x4a, 0x4b, 0x4e, 0x4f]
+# Настройки для INA237
+i2caddr_list = [0x4a, 0x4b, 0x4e, 0x4f]
 
-# Регистры
-REG_CONFIG = 0x00
-REG_ADC_CONFIG = 0x01
-REG_SHUNT_CAL = 0x02
-REG_VSHUNT = 0x04
-REG_VBUS = 0x05
-REG_DIETEMP = 0x06
-REG_CURRENT = 0x07
-REG_POWER = 0x08
-REG_DIAG_ALRT = 0x0B
-REG_SOVL = 0x0C
-REG_SUVL = 0x0D
-REG_BOVL = 0x0E
-REG_BUVL = 0x0F
-REG_TEMP_LIMIT = 0x10
-REG_PWR_LIMIT = 0x11
-REG_MANUFACTURER_ID = 0x3E
-REG_DEVICE_ID = 0x3F
+# Регистры INA237
+REG_SHUNT_CAL        = 0x02
+REG_VBUS             = 0x05
+REG_DIETEMP          = 0x06
+REG_CURRENT          = 0x07
+REG_POWER            = 0x08
+REG_MANUFACTURER_ID  = 0x3E  # Значение по умолчанию: 0x5449 ("TI")
 
-# Значения для калибровки и вычислений
-max_voltage = 75            # 75 В
-shunt_resistance = 0.005    # 5 мОм
-max_current = 20            # 20 А
+# Расчет коэффициентов (LSB)
+max_current = 20        
+shunt_resistance = 0.005 
 
-current_lsb = max_current/32768
-vbus_lsb = 3.125 * 10**(-3)         # LSB напряжения шины = 3.125 мВ
-dietemp_lsb = 125 * 10**(-3)        # LSB температуры = 125 мК (0.125 °C)
-conversion_factor = 5 * 10 **(-6)
-
+current_lsb = max_current / 32768
+vbus_lsb = 3.125 * 10**(-3)       
+dietemp_lsb = 125 * 10**(-3)     
 power_lsb = 0.2 * current_lsb
-calibration_value = int((819.2 * 10**6) * (current_lsb * shunt_resistance))
-calibration_value &= 0x7FFF # Сброс 15-го бита по спецификации INA237
 
-print("Рассчитанное калибровочное значение:", hex(calibration_value))
+calibration_value = int((819.2 * 10**6) * current_lsb * shunt_resistance)
+calibration_value &= 0x7FFF  
+
+# Проверка наличия и удаления ssh-ключа конкретного хоста с бэкапом и поддержкой хеширования
+
+# Пути к файлам
+hosts_file = os.path.expanduser('~/.ssh/known_hosts')
+backup_file = f"{hosts_file}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+
+# Загружаем текущие ключи
+if not os.path.exists(hosts_file):
+    print(f"Ошибка: файл {hosts_file} не найден.", file=sys.stderr)
+    sys.exit(1)
+
+host_keys = paramiko.HostKeys(filename=hosts_file)
+
+# Ищем записи, соответствующие хосту (включая хэшированные)
+matched_entries = host_keys.lookup(host)
+
+if matched_entries:
+    # Создаем временный бэкап перед изменениями
+    try:
+        shutil.copy2(hosts_file, backup_file)
+        print(f"Создан временный бэкап: {backup_file}")
+    except Exception as e:
+        print(f"Критическая ошибка: не удалось создать бэкап. Изменения не внесены. {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Фильтруем записи, удаляя те, которые соответствуют нашему хосту
+    keys_to_remove = list(matched_entries.keys())
+    host_keys._entries = [
+        entry for entry in host_keys._entries 
+        if not (host_keys.check(host, entry.key) and entry.key.get_name() in keys_to_remove)
+    ]
+
+    # Безопасное сохранение изменений и удаление бэкапа
+    try:
+        # Пытаемся сохранить файл
+        host_keys.save(hosts_file)
+        print(f"Ключи для хоста {host} успешно удалены из {hosts_file}")
+        
+        # Если сохранение прошло успешно — удаляем бэкап
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+            print("Временный бэкап успешно удален.")
+            
+    except PermissionError:
+        print(f"Ошибка доступа: нет прав на запись в файл {hosts_file}. Бэкап сохранен в {backup_file}", file=sys.stderr)
+    except Exception as e:
+        print(f"Не удалось сохранить файл {hosts_file}. Ошибка: {e}. Бэкап сохранен в {backup_file}", file=sys.stderr)
+else:
+    print(f"Хост {host} не найден в {hosts_file} (проверены явные и хэшированные записи)")
 
 # Подключение по SSH
 client = paramiko.SSHClient()
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
 try:
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     print(f"Подключение к {host}...")
     client.connect(host, username=user, password=password, timeout=10)
 except (socket.gaierror, socket.error, paramiko.SSHException) as e:
     print(f"Не удалось подключиться к {host}: {e}")
     sys.exit(1)
 
-try:
-     for i in range(4):
-         print(f"\n--- Фидер {i+1} (Адрес: {hex(i2caddr[i])}) ---")
-         addr = i2caddr[i]
-         
-         # Запись калибровочного значения
-         client.exec_command(f'i2cset -y {slot} {i2caddr[i]} {REG_SHUNT_CAL} {calibration_value} w')
-         time.sleep(0.05)
+def ssh_run_cmd(cmd):
+    """Выполняет команду на удаленном хосте"""
+    stdin, stdout, stderr = client.exec_command(cmd)
+    error = stderr.read().decode().strip()
+    if error:
+        return None
+    return stdout.read().decode().strip()
 
-         # Чтение и проверка калибровочного регистра
-         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_shunt_cal} w')
-         cal_read = parse_i2c_word(stdout.read().decode())
-         print(f"Калибровка записана/прочитана: {hex(cal_read)}")
-         
-         # Чтение напряжения шины (VBUS)
-         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_vbus} w')
-         vbus_raw = parse_i2c_word(stdout.read().decode())
-         vbus_actual = twos_comp(vbus_raw, 16) * vbus_lsb
-         print(f"Напряжение шины: {vbus_actual:.3f} В")
+def swap_bytes(val):
+    """Меняет местами старший и младший байты в 16-битном слове"""
+    low_byte = (val & 0xFF00) >> 8
+    high_byte = (val & 0x00FF) << 8
+    return high_byte | low_byte
+
+def detect_endianness(slot, addr):
+    """
+    Автоматически определяет порядок байт утилиты i2cget.
+    Читает REG_MANUFACTURER_ID (должен быть 0x5449).
+    """
+    cmd = f"i2cget -y {slot} {hex(addr)} {hex(REG_MANUFACTURER_ID)} w"
+    res = ssh_run_cmd(cmd)
+    if not res:
+        return None
+    try:
+        val = int(res, 16)
+        if val == 0x5449:
+            print(f"[Автоопределение] Датчик {hex(addr)} вернул 0x5449. Режим: Big-Endian (без инверсии байт).")
+            return 'big'
+        elif val == 0x4954:
+            print(f"[Автоопределение] Датчик {hex(addr)} вернул 0x4954. Режим: Little-Endian (требуется инверсия байт).")
+            return 'little'
+        else:
+            print(f"[Предупреждение] Неизвестный ID производителя: {hex(val)} на адресе {hex(addr)}.")
+            return None
+    except ValueError:
+        return None
+
+def read_i2c_word(slot, addr, reg, endianness):
+    """Читает 16-битное слово с учетом порядка байт."""
+    cmd = f"i2cget -y {slot} {hex(addr)} {hex(reg)} w"
+    res = ssh_run_cmd(cmd)
+    if not res:
+        return None
+    try:
+        val = int(res, 16)
+        return swap_bytes(val) if endianness == 'little' else val
+    except ValueError:
+        return None
+
+def write_i2c_word(slot, addr, reg, val, endianness):
+    """Записывает 16-битное слово с учетом порядка байт."""
+    swapped_val = swap_bytes(val) if endianness == 'little' else val
+    cmd = f"i2cset -y {slot} {hex(addr)} {hex(reg)} {hex(swapped_val)} w"
+    ssh_run_cmd(cmd)
+
+try:
+    # Автоопределение порядка байт по первому доступному датчику
+    detected_endianness = None
+    for addr in i2caddr_list:
+        detected_endianness = detect_endianness(slot, addr)
+        if detected_endianness:
+            break
             
-         # Чтение тока (CURRENT)
-         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_current} w')
-         current_raw = parse_i2c_word(stdout.read().decode())
-         current_actual = twos_comp(current_raw, 16) * current_lsb
-         print(f"Ток: {current_actual:.3f} А")
+    if not detected_endianness:
+        print("Ошибка: Не удалось определить порядок байт. Ни один датчик INA237 не ответил корректно.")
+        sys.exit(1)
+
+    # Цикл опроса датчиков с использованием определенного режима
+    for addr in i2caddr_list:
+        print(f"\n--- Опрос датчика по адресу {hex(addr)} ---")
         
-         # Чтение мощности (POWER)
-         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_power} w')
-         power_raw = parse_i2c_word(stdout.read().decode())
-         power_actual = power_raw * power_lsb
-         print(f"Мощность: {power_actual:.3f} Вт")
+        # Запись калибровочного значения
+        write_i2c_word(slot, addr, REG_SHUNT_CAL, calibration_value, detected_endianness)
         
-         # Чтение температуры (DIETEMP)
-         _, stdout, _ = client.exec_command(f'i2cget -y {slot} {addr} {reg_dietemp} w')
-         temp_raw = parse_i2c_word(stdout.read().decode())
-         # Сдвиг вправо на 4 бита обязателен, так как данные температуры в INA237 лежат в битах 15:4
-         temp_raw_shifted = twos_comp(temp_raw >> 4, 12)
-         temp_actual = temp_raw_shifted * dietemp_lsb
-         print(f"Температура чипа: {temp_actual:.1f} °C")
+        # Чтение регистров
+        vbus_raw = read_i2c_word(slot, addr, REG_VBUS, detected_endianness)
+        current_raw = read_i2c_word(slot, addr, REG_CURRENT, detected_endianness)
+        power_raw = read_i2c_word(slot, addr, REG_POWER, detected_endianness)
+        temp_raw = read_i2c_word(slot, addr, REG_DIETEMP, detected_endianness)
+        
+        if vbus_raw is None:
+            print(f"Ошибка: датчик {hex(addr)} не отвечает.")
+            continue
+            
+        # Преобразование данных согласно даташиту INA237
+        vbus = (vbus_raw >> 4) * vbus_lsb
+        
+        temp_sign = twos_comp(temp_raw >> 4, 12)
+        temp = temp_sign * dietemp_lsb
+        
+        current_sign = twos_comp(current_raw, 16)
+        current = current_sign * current_lsb
+        
+        power = power_raw * power_lsb
+        
+        # Вывод результатов
+        print(f"Напряжение шины: {vbus:.3f} В")
+        print(f"Ток:             {current:.3f} А")
+        print(f"Мощность:        {power:.3f} Вт")
+        print(f"Температура чипа:{temp:.1f} °C")
 
 finally:
     client.close()
-    print("\nSSH-сессия закрыта.")
+    print("\nСоединение SSH закрыто.")
